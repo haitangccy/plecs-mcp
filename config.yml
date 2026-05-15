@@ -1,0 +1,4 @@
+plecs:
+  host: localhost
+  port: 1080
+  timeout: 300
