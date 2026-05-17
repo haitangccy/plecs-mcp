@@ -1,4 +1,25 @@
+# config/config.yml
+# PLECS MCP Server 配置文件
+# 所有配置均可被环境变量覆盖（优先级：环境变量 > 此文件 > 代码默认值）
+
 plecs:
-  host: localhost
+  # PLECS Standalone 的 XML-RPC 接口地址
+  # 开启方式：PLECS → Preferences → Simulation → 勾选 "Start XML-RPC server"
+  host: "localhost"
   port: 1080
+
+  # 仿真超时（秒）。长时仿真或参数扫描时可适当增大
   timeout: 300
+
+  # PLECS 可执行文件路径（仅用于 setup 脚本自动启动 PLECS，不影响 MCP 工具）
+  # Windows 示例："C:/Program Files/Plexim/PLECS 4.7 (64 bit)/plecs.exe"
+  # macOS 示例：  "/Applications/PLECS.app/Contents/MacOS/PLECS"
+  # Linux 示例：  "/opt/plexim/plecs47/plecs"
+  executable: ""
+
+server:
+  # 日志级别：DEBUG / INFO / WARNING / ERROR
+  log_level: "INFO"
+
+  # 工具调用最大重试次数（连接意外断开时）
+  max_retries: 2

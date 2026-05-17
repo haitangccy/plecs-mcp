@@ -1,21 +1,31 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "plecs-mcp"
-version = "0.1.0"
-description = "MCP server for PLECS Standalone XML-RPC automation."
-readme = "README.md"
+name        = "plecs-mcp"
+version     = "0.1.0"
+description = "MCP Server for PLECS 4.7 Standalone — AI-driven power electronics simulation"
+readme      = "README.md"
 requires-python = ">=3.10"
+
 dependencies = [
-    "mcp[cli]>=1.0.0",
-    "pyyaml>=6.0",
+    "mcp[cli]>=1.6.0",   # FastMCP + stdio/SSE transport
+    "pyyaml>=6.0",        # 配置文件解析
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-mock>=3.0",
 ]
 
 [project.scripts]
 plecs-mcp = "server:main"
 
-[tool.setuptools]
-py-modules = ["server", "plecs_client"]
-packages = ["tools"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
