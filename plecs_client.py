@@ -1,266 +1,282 @@
 """
-plecs_client.py
----------------
-PLECS 4.7 Standalone XML-RPC 客户端封装层。
+plecs_client.py  —  PLECS 4.7 XML-RPC 客户端
 
-PLECS Standalone 在 Preferences → Simulation 中开启 XML-RPC Server 后，
-默认在 localhost:1080 监听，所有命令以 plecs.<cmd>(...) 形式调用。
+严格按照 PLECS 暴露的 10 个 RPC 接口封装，不做额外抽象：
+    system.listMethods   → list_methods()
+    system.methodHelp    → method_help()
+    plecs.statistics     → statistics()
+    plecs.load           → load()
+    plecs.close          → close()
+    plecs.get            → get()
+    plecs.set            → set_param()
+    plecs.simulate       → simulate()
+    plecs.analyze        → analyze()
+    plecs.scope          → scope()
+    plecs.webserver      → webserver()
+    plecs.codegen        → codegen()
 """
 
 import xmlrpc.client
 import socket
 import logging
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class PlecsConnectionError(RuntimeError):
-    """无法连接到 PLECS 实例时抛出"""
-
-
-class PlecsRPCError(RuntimeError):
-    """PLECS XML-RPC 调用失败时抛出"""
+class PlecsError(RuntimeError):
+    """PLECS XML-RPC 调用失败"""
 
 
 class PlecsClient:
-    """
-    PLECS Standalone XML-RPC 客户端。
-
-    用法::
-
-        client = PlecsClient(host="localhost", port=1080)
-        client.connect()
-        model = client.load_model("C:/models/buck.plecs")
-        result = client.simulate(model, model_vars={"Vin": 48})
-        client.close_model(model)
-    """
-
-    def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 1080,
-        timeout: int = 300,
-    ):
+    def __init__(self, host: str = "localhost", port: int = 1080):
         self.host = host
         self.port = port
-        self.timeout = timeout
-        self.url = f"http://{host}:{port}/RPC2"
-        self._proxy: Optional[xmlrpc.client.ServerProxy] = None
+        self._proxy: xmlrpc.client.ServerProxy | None = None
 
-    # ── 连接管理 ────────────────────────────────────────────────────────
+    # ── 连接 ─────────────────────────────────────────────────────────────
 
-    def connect(self) -> bool:
-        """建立到 PLECS 的 XML-RPC 连接。返回 True 表示成功。"""
+    def connect(self) -> dict:
+        """
+        建立连接并返回 plecs.statistics() 结果。
+        成功时返回含 'version'、'build' 等字段的 dict；失败抛 PlecsError。
+        """
         try:
             self._proxy = xmlrpc.client.ServerProxy(
-                self.url,
+                f"http://{self.host}:{self.port}/RPC2",
                 allow_none=True,
             )
-            self._proxy.plecs.get("", "Version")
-            logger.info("已连接到 PLECS（%s）", self.url)
-            return True
-        except (ConnectionRefusedError, socket.gaierror, socket.timeout) as exc:
-            logger.warning("连接 PLECS 失败：%s", exc)
+            stats = self._proxy.plecs.statistics()
+            logger.info("已连接 PLECS %s @ %s:%d", stats.get("version"), self.host, self.port)
+            return dict(stats)
+        except (ConnectionRefusedError, socket.gaierror, OSError) as e:
             self._proxy = None
-            return False
-        except xmlrpc.client.Fault as exc:
-            # PLECS 响应了说明服务在运行，"Version" 命令格式问题可忽略
-            if self._proxy is not None:
-                logger.info("PLECS 已响应，视为连接成功（%s）", exc)
-                return True
-            return False
-
-    def disconnect(self) -> None:
-        """断开连接并释放资源。"""
-        self._proxy = None
-        logger.info("已断开 PLECS 连接")
+            raise PlecsError(f"无法连接到 {self.host}:{self.port} — {e}") from e
+        except xmlrpc.client.Fault as e:
+            self._proxy = None
+            raise PlecsError(f"plecs.statistics() 调用失败 — {e.faultString}") from e
 
     def is_connected(self) -> bool:
-        """检查当前是否有活跃连接。"""
         if self._proxy is None:
             return False
         try:
-            self._proxy.plecs.get("", "Version")
+            self._proxy.plecs.statistics()
             return True
         except Exception:
             return False
 
-    def get_version(self) -> str:
-        """返回 PLECS 版本字符串。"""
-        return str(self._call("plecs.get", "", "Version"))
-
-    @property
-    def proxy(self) -> xmlrpc.client.ServerProxy:
-        if self._proxy is None:
-            raise PlecsConnectionError(
-                "尚未连接到 PLECS。请先调用 plecs_connect 工具，"
-                "并确认 PLECS Standalone 已启动且 XML-RPC 接口已开启。"
-            )
-        return self._proxy
-
-    # ── 内部调用辅助 ────────────────────────────────────────────────────
-
     def _call(self, method: str, *args) -> Any:
-        """执行 XML-RPC 调用，统一做错误转换。"""
+        """执行任意 RPC 调用，统一转换错误类型。"""
+        if self._proxy is None:
+            raise PlecsError("未连接到 PLECS，请先调用 plecs_connect")
         try:
             parts = method.split(".")
-            obj = self.proxy
-            for part in parts:
-                obj = getattr(obj, part)
+            obj = self._proxy
+            for p in parts:
+                obj = getattr(obj, p)
             return obj(*args)
-        except xmlrpc.client.Fault as exc:
-            raise PlecsRPCError(
-                f"PLECS 命令 [{method}] 执行失败：{exc.faultString}"
-            ) from exc
-        except (ConnectionRefusedError, socket.gaierror) as exc:
+        except xmlrpc.client.Fault as e:
+            raise PlecsError(f"[{method}] 失败：{e.faultString}") from e
+        except (ConnectionRefusedError, socket.gaierror, OSError) as e:
             self._proxy = None
-            raise PlecsConnectionError(
-                f"与 PLECS 的连接已断开：{exc}"
-            ) from exc
+            raise PlecsError(f"连接已断开：{e}") from e
 
-    # ── 模型操作 ────────────────────────────────────────────────────────
+    # ── system.* ─────────────────────────────────────────────────────────
 
-    def load_model(self, path: str) -> str:
+    def list_methods(self) -> list[str]:
+        """system.listMethods — 返回 PLECS 暴露的所有 RPC 方法名列表。"""
+        return list(self._call("system.listMethods"))
+
+    def method_help(self, method_name: str) -> str:
+        """system.methodHelp — 返回指定方法的帮助文本。"""
+        return str(self._call("system.methodHelp", method_name))
+
+    # ── plecs.statistics ─────────────────────────────────────────────────
+
+    def statistics(self) -> dict:
         """
-        打开 .plecs 文件，返回模型名称（后续命令用此名称引用模型）。
+        plecs.statistics() — 返回 PLECS 实例的全局统计信息。
+
+        返回字段（实测 4.7.4）：
+            version   : str   如 "4.7.4"
+            build     : str   如 "4f3b445a 15.06.2023 16:17"
+            models    : list  当前已打开的模型名称列表
         """
-        result = self._call("plecs.load", path)
-        model_name = str(result) if result else _model_name_from_path(path)
-        logger.info("已加载模型：%s", model_name)
-        return model_name
+        result = self._call("plecs.statistics")
+        return dict(result) if result else {}
 
-    def save_model(self, model_name: str) -> None:
-        """保存已打开的模型。"""
-        self._call("plecs.save", model_name)
-        logger.info("已保存模型：%s", model_name)
+    # ── plecs.load / plecs.close ─────────────────────────────────────────
 
-    def close_model(self, model_name: str) -> None:
-        """关闭已打开的模型（不自动保存）。"""
-        self._call("plecs.close", model_name)
-        logger.info("已关闭模型：%s", model_name)
-
-    # ── 参数读写 ────────────────────────────────────────────────────────
-
-    def get_param(self, comp_path: str, param: str) -> Any:
+    def load(self, path: str) -> str:
         """
-        读取组件参数。
-
-        comp_path 示例::
-
-            ""             → PLECS 全局属性（"Version" 等）
-            "BuckConv"     → 模型级属性（"SimulationTime" 等）
-            "BuckConv/L1"  → 组件参数（"L" 等）
-        """
-        return self._call("plecs.get", comp_path, param)
-
-    def set_param(self, comp_path: str, param: str, value: Any) -> None:
-        """
-        修改组件参数。value 可以是数值、字符串或表达式字符串。
-        """
-        self._call("plecs.set", comp_path, param, value)
-        logger.debug("设置 %s.%s = %s", comp_path, param, value)
-
-    # ── 仿真控制 ────────────────────────────────────────────────────────
-
-    def simulate(
-        self,
-        model_name: str,
-        model_vars: Optional[dict] = None,
-        solver_opts: Optional[dict] = None,
-    ) -> dict:
-        """
-        运行时域仿真。
+        plecs.load(path) — 打开 .plecs 文件。
 
         Args:
-            model_name:  已加载的模型名称。
-            model_vars:  覆盖模型变量，例如 ``{"Vin": 48, "R_load": 10}``。
-                         对应模型初始化命令中定义的变量名。
-            solver_opts: 仿真选项，支持以下键：
-
-                         - ``StopTime``      仿真结束时间（秒）
-                         - ``MaxStep``       最大步长
-                         - ``MinStep``       最小步长
-                         - ``AbsTol``        绝对容差
-                         - ``RelTol``        相对容差
-                         - ``InitTimeStep``  初始步长
-                         - ``SolverMethod``  求解器（"auto"/"ode45" 等）
-                         - ``Refine``        输出加密倍数
+            path: 文件绝对路径，如 "C:/models/buck.plecs"
 
         Returns:
-            dict，包含 ``"Time"`` (list[float]) 和 ``"Values"`` (list[list[float]])。
+            模型名称字符串（不含路径和扩展名）
         """
-        opts: dict = {}
-        if model_vars:
-            opts["ModelVars"] = model_vars
-        if solver_opts:
-            opts.update(solver_opts)
+        result = self._call("plecs.load", path)
+        return str(result) if result else _name_from_path(path)
 
-        logger.info("开始仿真：%s，选项：%s", model_name, opts)
-        result = self._call("plecs.simulate", model_name, opts)
-        logger.info("仿真完成：%s", model_name)
-        return result if isinstance(result, dict) else {}
-
-    # ── 分析功能 ────────────────────────────────────────────────────────
-
-    def analyze(
-        self,
-        model_name: str,
-        analysis_type: str,
-        opts: dict,
-    ) -> dict:
+    def close(self, model_name: str) -> None:
         """
-        运行频域分析。
+        plecs.close(modelName) — 关闭已打开的模型（不自动保存）。
 
-        analysis_type 可选值：
-
-        - ``"ACSweep"``        AC 小信号扫频（Bode 图）
-        - ``"ImpedanceSweep"`` 阻抗扫频
-        - ``"TrFunction"``     传递函数提取
-
-        ACSweep opts 常用键::
-
-            FreqRange   : [f_start, f_stop]   单位 Hz
-            NumPoints   : int                 频率点数
-            Amplitude   : float               扰动幅值
-            SteadyState : bool                先跑到稳态再扫频
+        Args:
+            model_name: 模型名称，来自 load() 的返回值
         """
-        logger.info("运行分析：%s / %s，选项：%s", model_name, analysis_type, opts)
+        self._call("plecs.close", model_name)
+
+    # ── plecs.get / plecs.set ────────────────────────────────────────────
+
+    def get(self, path: str, param: str) -> Any:
+        """
+        plecs.get(path, param) — 读取组件或模型参数。
+
+        Args:
+            path:  组件层级路径。
+                   ""              → 不支持（用 statistics() 读全局信息）
+                   "ModelName"     → 模型级参数，如 "StopTime"、"Ts"
+                   "ModelName/C1"  → 组件参数，如 "C"、"V_init"
+
+            param: 参数名称字符串
+
+        Returns:
+            参数值，类型取决于 PLECS 返回内容（str / float / list / dict）
+        """
+        return self._call("plecs.get", path, param)
+
+    def set_param(self, path: str, param: str, value: Any) -> None:
+        """
+        plecs.set(path, param, value) — 修改组件或模型参数。
+
+        Args:
+            path:  同 get()
+            param: 参数名称
+            value: 新值（str / float / int，PLECS 会自动解析表达式字符串）
+        """
+        self._call("plecs.set", path, param, value)
+
+    # ── plecs.simulate ───────────────────────────────────────────────────
+
+    def simulate(self, model_name: str, opts: dict | None = None) -> dict:
+        """
+        plecs.simulate(modelName, opts) — 运行时域仿真。
+
+        Args:
+            model_name: 已加载的模型名称
+            opts: 可选仿真选项 dict，支持以下键：
+
+                ModelVars    : dict  覆盖模型变量，如 {"Vin": 48, "R": 10}
+                StopTime     : float 仿真结束时间（秒）
+                MaxStep      : float 最大步长
+                MinStep      : float 最小步长
+                AbsTol       : float 绝对容差
+                RelTol       : float 相对容差
+                InitTimeStep : float 初始步长
+                Solver       : str   求解器，如 "auto"、"ode45"
+                Refine       : int   输出加密倍数
+
+        Returns:
+            dict，包含：
+                "Time"   : list[float]        时间向量
+                "Values" : list[list[float]]  各 Output 端口的数据
+        """
+        args = [model_name, opts or {}]
+        result = self._call("plecs.simulate", *args)
+        return dict(result) if result else {}
+
+    # ── plecs.analyze ────────────────────────────────────────────────────
+
+    def analyze(self, model_name: str, analysis_type: str, opts: dict) -> dict:
+        """
+        plecs.analyze(modelName, analysisType, opts) — 运行频域/稳态分析。
+
+        Args:
+            model_name:    已加载的模型名称
+            analysis_type: 分析类型字符串，必须与模型中定义的分析名称一致：
+                           "SteadyState"  稳态分析
+                           "ACSweep"      AC 小信号扫频
+                           "FreqResp"     频率响应
+                           "Multitone"    多音分析
+                           "ImpulseResp"  脉冲响应
+
+            opts: 分析选项 dict，不同分析类型支持不同键。
+                  ACSweep 常用键：
+                      SysName    : str           分析对象名称（必填）
+                      FreqRange  : [f_min, f_max] 频率范围（Hz）
+                      NumPoints  : int            频率点数
+                      Amplitude  : float          扰动幅值
+                      LogScale   : bool           对数分布
+                      SettlingTime: float         稳定等待时间
+
+        Returns:
+            dict，ACSweep 返回：
+                "Frequencies" : list[float]  频率点（Hz）
+                "Magnitude"   : list[float]  幅频（dB）
+                "Phase"       : list[float]  相频（°）
+        """
         result = self._call("plecs.analyze", model_name, analysis_type, opts)
-        return result if isinstance(result, dict) else {}
+        return dict(result) if result else {}
 
-    # ── Scope 操作 ──────────────────────────────────────────────────────
+    # ── plecs.scope ──────────────────────────────────────────────────────
 
-    def scope_clear(self, scope_path: str) -> None:
-        """清除 Scope 中的所有波形轨迹。"""
-        self._call("plecs.scope", scope_path, "ClearTraces")
+    def scope(self, scope_path: str, command: str, *args) -> Any:
+        """
+        plecs.scope(scopePath, command, ...) — Scope 操作。
 
-    def scope_hold_trace(self, scope_path: str, label: str = "") -> None:
-        """保留当前波形轨迹（叠加多次仿真结果时使用）。"""
-        self._call("plecs.scope", scope_path, "HoldTrace", label)
+        Args:
+            scope_path: Scope 组件路径，如 "ModelName/Scope"
+            command:    操作指令字符串（大小写敏感）：
+                        "ClearTraces"   清除所有波形轨迹
+                        "HoldTrace"     保留当前波形（可选 label 参数）
+                        "SaveTrace"     保存当前波形（可选 label 参数）
+                        "ExportCSV"     导出 CSV（需传 filename 参数）
+                        "ExportBitmap"  导出位图截图（需传 filename 参数）
+                        "GetCursorData" 获取游标数据（需传时间范围参数）
+            *args:      命令所需的额外参数（见 command 说明）
 
-    def scope_export_csv(self, scope_path: str, output_path: str) -> None:
-        """将 Scope 波形数据导出为 CSV 文件。"""
-        self._call("plecs.scope", scope_path, "ExportCSV", output_path)
+        Returns:
+            依命令不同返回 None 或数据 dict
+        """
+        return self._call("plecs.scope", scope_path, command, *args)
 
-    def scope_export_image(self, scope_path: str, output_path: str) -> None:
-        """将 Scope 截图导出为图片（支持 PNG/SVG）。"""
-        self._call("plecs.scope", scope_path, "ExportBitmap", output_path)
+    # ── plecs.webserver ──────────────────────────────────────────────────
 
-    # ── 便捷工具 ────────────────────────────────────────────────────────
+    def webserver(self, command: str, *args) -> Any:
+        """
+        plecs.webserver(command, ...) — 控制 PLECS Web 仿真服务器。
 
-    def list_components(self, model_name: str) -> list:
-        """列举模型顶层的所有组件名称。"""
-        try:
-            result = self._call("plecs.get", model_name, "Components")
-            return list(result) if result else []
-        except PlecsRPCError:
-            return []
+        Args:
+            command: "start" / "stop" / "status"
+            *args:   命令相关参数
+
+        Returns:
+            依命令返回状态信息
+        """
+        return self._call("plecs.webserver", command, *args)
+
+    # ── plecs.codegen ────────────────────────────────────────────────────
+
+    def codegen(self, model_name: str, opts: dict | None = None) -> dict:
+        """
+        plecs.codegen(modelName, opts) — 触发代码生成。
+
+        Args:
+            model_name: 已加载的模型名称
+            opts:       代码生成选项 dict（参见 PLECS 手册 Code Generation 章节）
+
+        Returns:
+            代码生成结果信息 dict
+        """
+        result = self._call("plecs.codegen", model_name, opts or {})
+        return dict(result) if result else {}
 
 
-# ── 辅助函数 ─────────────────────────────────────────────────────────────
+# ── 工具函数 ──────────────────────────────────────────────────────────────
 
-def _model_name_from_path(path: str) -> str:
-    """从文件路径提取不含扩展名的模型名。"""
+def _name_from_path(path: str) -> str:
     import os
-    return os.path.splitext(os.path.basename(path))[0]
+    return os.path.splitext(os.path.basename(path.replace("\\", "/")))[0]
